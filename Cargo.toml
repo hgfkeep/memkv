@@ -11,3 +11,6 @@ members=["dbcore"]
 
 [dependencies]
 dbcore = {path="dbcore"}
+clap = { git = "https://github.com/clap-rs/clap/" }
+rustyline = "6.0.0"
+rustyline-derive = "0.3.0"
