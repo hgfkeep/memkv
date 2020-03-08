@@ -2,7 +2,7 @@
 
 in memory kv store written in rust. please wait, it's under constructing.
 
-## Done
+## TODO List
 
 * String
     - [x] get key
