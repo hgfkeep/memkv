@@ -20,6 +20,8 @@ enum Value {
     HashValue(HashMap<String, String>),
 }
 
+pub type Result<T> = std::result::Result<T, DBError>;
+
 #[derive(Debug)]
 pub struct KVDB {
     db: HashMap<String, Value>,
@@ -33,7 +35,6 @@ pub struct KVDB {
 pub const DEFAULT_DB_KEY_SIZE: usize = 256;
 
 impl KVDB {
-
     /// 默认构建KVDB，无限 key size
     pub fn default() -> Self {
         KVDB::new(None)
@@ -76,11 +77,11 @@ impl KVDB {
         &mut self,
         key: &String,
         value: String,
-        expire: Option<u64>,
         not_exists: bool,
         already_exists: bool,
-    ) -> Result<DBOk, DBError> {
-        let res: Result<DBOk, DBError>;
+        expire: Option<u64>,
+    ) -> Result<DBOk> {
+        let res: Result<DBOk>;
         match self.db.get(key) {
             Some(Value::StringValue(_)) => {
                 if not_exists {
@@ -122,8 +123,8 @@ impl KVDB {
 
     /// 简单的插入方法
     /// 详情查看 `set()` 方法
-    pub fn sets(&mut self, key: &String, value: String) -> Result<DBOk, DBError> {
-        self.set(key, value, None, false, false)
+    pub fn sets(&mut self, key: &String, value: String) -> Result<DBOk> {
+        self.set(key, value, false, false, None)
     }
 
     /// 获取与 key 关联的字符串的值
@@ -133,7 +134,7 @@ impl KVDB {
     ///     * key存在且value类型正确， 返回value
     ///     * value类型不是字符串， 返回WrongValueType
     ///     * key 不存在，返回None
-    pub fn get(&self, key: &String) -> Result<Option<String>, DBError> {
+    pub fn get(&self, key: &String) -> Result<Option<String>> {
         match self.db.get(key) {
             Some(Value::StringValue(v)) => Ok(Some(v.clone())),
             Some(_) => Err(DBError::WrongValueType),
@@ -152,10 +153,10 @@ impl KVDB {
     /// 返回值：
     ///     * 被添加到集合中的**新元素**的数量，不包括被忽略的元素。
     ///     * 当 key 不是集合类型时，返回一个错误。
-    pub fn sadd(&mut self, key: &String, members: Vec<String>) -> Result<u32, DBError> {
+    pub fn sadd(&mut self, key: &String, members: Vec<String>) -> Result<usize> {
+        let mut counter: usize = 0;
         match self.db.get_mut(key) {
             Some(Value::SetValue(v)) => {
-                let mut counter: u32 = 0;
                 members.into_iter().for_each(|member| {
                     if v.insert(member) {
                         counter += 1;
@@ -168,7 +169,6 @@ impl KVDB {
             None => {
                 if self.can_add_key() {
                     let mut set = HashSet::new();
-                    let mut counter: u32 = 0;
                     members.into_iter().for_each(|member| {
                         set.insert(member);
                         counter += 1;
@@ -184,21 +184,21 @@ impl KVDB {
 
     ///
     /// 移除并返回集合中的最多 count 个随机元素, 当集合的元素少于count时，返回集合中的所有元素。
-    /// 时间复杂度 O(count)
+    /// 时间复杂度 O(N), N 为 set 集合元素个数
+    /// TODO： 时间复杂度提升
     ///
     /// 返回值：
     ///     * 最多 count 个集合元素
     ///     * key 对应 value 的类型不是 Set， 则返回 WrongValueType
     ///     * key不存在或空集则返回 None
-    pub fn srandmember(
-        &self,
-        key: &String,
-        count: usize,
-    ) -> Result<Option<HashSet<String>>, DBError> {
-        match self.db.get(key) {
+    pub fn srandmember(&mut self, key: &String, count: usize) -> Result<Option<HashSet<String>>> {
+        match self.db.get_mut(key) {
             Some(Value::SetValue(v)) => {
                 //WARNNING: rust can only clone and then remove;
                 let res: HashSet<String> = v.clone().into_iter().take(count).collect();
+                res.iter().for_each(|s| {
+                    v.remove(s);
+                });
                 Ok(Some(res))
             }
             Some(_) => Err(DBError::WrongValueType),
@@ -214,7 +214,7 @@ impl KVDB {
     ///     * 被移除的随机元素。
     ///     * 当 key 不存在或 key 是空集时，返回 None
     ///     * 当key对应的value 不是 Set 时，返回 WrongValueType
-    pub fn spop(&mut self, key: &String) -> Result<Option<String>, DBError> {
+    pub fn spop(&mut self, key: &String) -> Result<Option<String>> {
         match self.db.get_mut(key) {
             Some(Value::SetValue(v)) => {
                 //WARNNING: rust can only clone and then remove;
@@ -229,7 +229,7 @@ impl KVDB {
         }
     }
 
-    pub fn sismember(&self, key: &String, member: &String) -> Result<Option<bool>, DBError> {
+    pub fn sismember(&self, key: &String, member: &String) -> Result<Option<bool>> {
         match self.db.get(key) {
             Some(Value::SetValue(v)) => {
                 if v.contains(member) {
@@ -251,10 +251,10 @@ impl KVDB {
     ///     * key不存在，返回0
     ///     * value类型不是集合类型， 返回DBError::WrongValueType
     ///
-    pub fn srem(&mut self, key: &String, members: Vec<String>) -> Result<u32, DBError> {
+    pub fn srem(&mut self, key: &String, members: Vec<String>) -> Result<usize> {
         match self.db.get_mut(key) {
             Some(Value::SetValue(v)) => {
-                let mut counter: u32 = 0;
+                let mut counter: usize = 0;
                 members.iter().for_each(|member| {
                     if v.remove(member) {
                         counter += 1;
@@ -267,6 +267,21 @@ impl KVDB {
         }
     }
 
+    /// 获取集合中的成员数量
+    /// 时间复杂度： O(1)
+    ///
+    /// 返回值：
+    ///     * 集合中成员数量
+    ///     * key不存在，返回DBError::KeyNotFound
+    ///     * value类型不是集合类型， 返回DBError::WrongValueType
+    pub fn slen(&self, key: &String) -> Result<Option<usize>> {
+        match self.db.get(key) {
+            Some(Value::SetValue(v)) => Ok(Some(v.len())),
+            Some(_) => Err(DBError::WrongValueType),
+            None => Ok(None),
+        }
+    }
+
     /// 获取集合中的所有成员 members
     /// 时间复杂度: O(N)， N 为给定 member 元素的数量
     ///
@@ -275,7 +290,7 @@ impl KVDB {
     ///     * key不存在，返回DBError::KeyNotFound
     ///     * value类型不是集合类型， 返回DBError::WrongValueType
     ///
-    pub fn members(&self, key: &String) -> Result<Option<HashSet<String>>, DBError> {
+    pub fn smembers(&self, key: &String) -> Result<Option<HashSet<String>>> {
         match self.db.get(key) {
             Some(Value::SetValue(v)) => Ok(Some(v.clone())),
             Some(_) => Err(DBError::WrongValueType),
@@ -293,7 +308,7 @@ impl KVDB {
     ///     * 创建新的field，则返回1；
     ///     * 覆盖原field，则返回0；
     ///     * key对应的类型不是HashMap类型，那么返回错误信息
-    pub fn hset(&mut self, key: &String, field: String, value: String) -> Result<u32, DBError> {
+    pub fn hset(&mut self, key: &String, field: String, value: String) -> Result<u32> {
         match self.db.get_mut(key) {
             Some(Value::HashValue(v)) => {
                 if let Some(_) = v.insert(field, value) {
@@ -324,7 +339,7 @@ impl KVDB {
     ///     * 返回 给定域 field 的值
     ///     * 给定域不存在于哈希表中， 又或者给定的哈希表并不存在， 返回None
     ///     * key对应的类型不是哈希表， 返回 WrongValueType
-    pub fn hget(&self, key: &String, field: &String) -> Result<Option<String>, DBError> {
+    pub fn hget(&self, key: &String, field: &String) -> Result<Option<String>> {
         match self.db.get(key) {
             Some(Value::HashValue(v)) => {
                 if let Some(value) = v.get(field) {
@@ -338,6 +353,58 @@ impl KVDB {
         }
     }
 
+    /// 同时将多个 field-value (域-值)对设置到哈希表 key 中。
+    /// 此命令会覆盖哈希表中已存在的域。
+    /// 时间复杂度：O(N)， N 为 field-value 对的数量。
+    ///
+    /// 返回值：
+    ///     * 如果命令执行成功，返回 OK 。
+    ///     * 当 key 不是哈希表(hash)类型时，返回一个错误。
+    pub fn hmset(&mut self, key: &String, pairs: Vec<(String, String)>) -> Result<DBOk> {
+        match self.db.get_mut(key) {
+            Some(Value::HashValue(v)) => {
+                pairs.into_iter().for_each(|(field, value)| {
+                    v.insert(field, value);
+                });
+                Ok(DBOk::Ok)
+            }
+            Some(_) => Err(DBError::WrongValueType),
+            None => {
+                if self.can_add_key() {
+                    let mut hashmap: HashMap<String, String> = HashMap::new();
+                    pairs.into_iter().for_each(|(field, value)| {
+                        hashmap.insert(field, value);
+                    });
+                    self.db.insert(key.clone(), Value::HashValue(hashmap));
+                    Ok(DBOk::Ok)
+                } else {
+                    Err(DBError::OutOfKeysSize)
+                }
+            }
+        }
+    }
+
+    ///返回哈希表 key 中，一个或多个给定域的值。
+    /// 时间复杂度： O(N), N 是 fields 的数量
+    ///
+    /// 返回值：
+    ///     * fields 对应的 values ；顺序一一对应
+    ///     * 如果 filed 不存在，返回Option::None
+    ///     * 如果 key 不存在，那么返回 DBError::KeyNotFound
+    pub fn hmget(&self, key: &String, fields: &Vec<String>) -> Result<Vec<Option<String>>> {
+        match self.db.get(key) {
+            Some(Value::HashValue(v)) => {
+                let values: Vec<Option<String>> = fields
+                    .iter()
+                    .map(|field| v.get(field).and_then(|z| Some(z.clone())))
+                    .collect();
+                Ok(values)
+            }
+            Some(_) => Err(DBError::WrongValueType),
+            None => Err(DBError::KeyNotFound),
+        }
+    }
+
     ///
     /// 返回哈希表 key 中的所有域。
     /// 时间复杂度： O(N)， N为哈希表大小
@@ -346,7 +413,7 @@ impl KVDB {
     ///     * 返回 一个包含哈希表中所有域的表。
     ///     * 当 key 不存在时，返回 None。
     ///     * key对应的类型不是哈希表， 返回 WrongValueType
-    pub fn hkeys(&self, key: &String) -> Result<Option<Vec<String>>, DBError> {
+    pub fn hkeys(&self, key: &String) -> Result<Option<Vec<String>>> {
         match self.db.get(key) {
             Some(Value::HashValue(v)) => {
                 let keys: Vec<String> = v.keys().map(|s| s.clone()).collect();
@@ -365,7 +432,7 @@ impl KVDB {
     ///     * 返回 一个包含哈希表中所有值的表。
     ///     * 当 key 不存在时，返回 None。
     ///     * key对应的类型不是哈希表， 返回 WrongValueType
-    pub fn hvalues(&self, key: &String) -> Result<Option<Vec<String>>, DBError> {
+    pub fn hvalues(&self, key: &String) -> Result<Option<Vec<String>>> {
         match self.db.get(key) {
             Some(Value::HashValue(v)) => {
                 let values: Vec<String> = v.values().map(|s| s.clone()).collect();
@@ -384,7 +451,7 @@ impl KVDB {
     ///     * field 存在时，返回 true， field 不存在， 返回 false。
     ///     * 当 key 不存在时，返回 None。
     ///     * key对应的类型不是哈希表， 返回 WrongValueType
-    pub fn hexists(&self, key: &String, field: &String) -> Result<Option<bool>, DBError> {
+    pub fn hexists(&self, key: &String, field: &String) -> Result<Option<bool>> {
         match self.db.get(key) {
             Some(Value::HashValue(v)) => {
                 if v.contains_key(field) {
@@ -406,7 +473,7 @@ impl KVDB {
     ///     * 哈希表中域的数量。
     ///     * 当 key 不存在时，返回 0
     ///     * key对应的类型不是哈希表， 返回 WrongValueType
-    pub fn hlen(&self, key: &String) -> Result<Option<usize>, DBError> {
+    pub fn hlen(&self, key: &String) -> Result<Option<usize>> {
         match self.db.get(key) {
             Some(Value::HashValue(v)) => Ok(Some(v.len())),
             Some(_) => Err(DBError::WrongValueType),
@@ -423,7 +490,7 @@ impl KVDB {
     ///     * 当 key 不存在时，返回 0
     ///     * key对应的类型不是哈希表， 返回 WrongValueType
     ///
-    pub fn hdel(&mut self, key: &String, field: &String) -> Result<Option<u32>, DBError> {
+    pub fn hdel(&mut self, key: &String, field: &String) -> Result<Option<usize>> {
         match self.db.get_mut(key) {
             Some(Value::HashValue(v)) => {
                 if let Some(_) = v.remove(field) {
@@ -447,7 +514,7 @@ impl KVDB {
 
     /// 删除db中的keys
     /// 时间复杂度 O(N), N为输入的key的数量
-    /// 
+    ///
     /// 返回值：成功删除的key的数量
     ///     
     pub fn del(&mut self, keys: Vec<String>) -> u32 {
@@ -464,7 +531,7 @@ impl KVDB {
     ///
     /// 判断库中 key 是否存在
     /// 时间复杂度 O(1)
-    /// 
+    ///
     /// 返回值：key存在返回 true; 否则返回false
     pub fn exists(&self, key: &String) -> bool {
         self.db.contains_key(key)
@@ -473,9 +540,9 @@ impl KVDB {
     ///
     /// 获取数据库中 key的数量
     /// 时间复杂度 O(N), N数据库中的key的数量
-    /// 
+    ///
     /// TODO: 可以优化为O(1), 添加一个key的计数器。
-    /// 
+    ///
     /// 返回值：数据库中key的数量
     pub fn size(&self) -> usize {
         self.db.len()
